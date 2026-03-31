@@ -13,6 +13,10 @@ from typing import AsyncIterator
 import httpx
 from fastapi import APIRouter, HTTPException, Path, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+import base64
+import urllib.parse
+from webauthn import generate_registration_options, verify_registration_response, generate_authentication_options, verify_authentication_response
+from webauthn.helpers.structs import AuthenticatorSelectionCriteria, UserVerificationRequirement
 from fastapi.templating import Jinja2Templates
 
 from app import database as db
@@ -38,6 +42,11 @@ _ALLOWED_SSE_EVENTS = {"state_change", "token_expired", "reconnected"}
 _states_cache: list[dict] | None = None
 _states_cache_ts: float = 0
 STATE_CACHE_TTL = 30  # seconds
+
+# WebAuthn
+RP_ID = urllib.parse.urlparse(settings.guest_url).hostname or "localhost"
+RP_NAME = settings.app_name
+challenge_cache: dict[str, bytes] = {}
 
 
 async def _get_cached_states() -> list[dict]:
@@ -109,13 +118,42 @@ async def guest_pwa(request: Request, slug: str = Path(max_length=64)):
         ctx.update({"slug": slug, "contact_message": settings.contact_message})
         return templates.TemplateResponse(request, "expired.html", ctx, status_code=410)
 
-    await db.touch_token(row["id"])
+    token_id = row["id"]
+    await db.touch_token(token_id)
     await db.log_access(
-        token_id=row["id"],
+        token_id=token_id,
         event_type="page_load",
         ip_address=_client_ip(request),
         user_agent=request.headers.get("User-Agent"),
     )
+
+    passkeys = await db.get_passkeys_for_token(token_id)
+    opted_out = row.get("passkey_opted_out", 0)
+    never_expires = (row["expires_at"] >= NEVER_EXPIRES_SECONDS)
+    
+    passkey_status = "OK"
+    cookie_name = f"guest_auth_{token_id}"
+    is_authenticated = request.cookies.get(cookie_name) == "true"
+    
+    if never_expires:
+        if len(passkeys) == 0:
+            passkey_status = "UNCONFIGURED_REQUIRED"
+        elif not is_authenticated:
+            passkey_status = "CONFIGURED_UNAUTHENTICATED"
+        else:
+            passkey_status = "AUTHENTICATED"
+    else:
+        if len(passkeys) > 0:
+            if not is_authenticated:
+                passkey_status = "CONFIGURED_UNAUTHENTICATED"
+            else:
+                passkey_status = "AUTHENTICATED"
+        else:
+            if not opted_out:
+                passkey_status = "UNCONFIGURED_OPTIONAL"
+            else:
+                passkey_status = "OPTED_OUT"
+
     ctx = base_context(request)
     ctx.update({
         "slug": slug,
@@ -123,6 +161,7 @@ async def guest_pwa(request: Request, slug: str = Path(max_length=64)):
         "expires_at": row["expires_at"],
         "contact_message": settings.contact_message,
         "never_expires": NEVER_EXPIRES_SECONDS,
+        "passkey_status": passkey_status,
     })
     return templates.TemplateResponse(request, "guest_pwa.html", ctx)
 
@@ -232,6 +271,13 @@ async def guest_command(body: CommandRequest, request: Request, slug: str = Path
     row = await _validate_token(slug, request)
     token_id = row["id"]
 
+    passkeys = await db.get_passkeys_for_token(token_id)
+    never_expires = (row["expires_at"] >= NEVER_EXPIRES_SECONDS)
+    is_authenticated = request.cookies.get(f"guest_auth_{token_id}") == "true"
+    
+    if (len(passkeys) > 0 or never_expires) and not is_authenticated:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Passkey authentication required")
+
     allowed = await rate_limiter.check(token_id, COMMAND_RPM)
     if not allowed:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
@@ -277,3 +323,119 @@ async def guest_command(body: CommandRequest, request: Request, slug: str = Path
     )
 
     return {"ok": True}
+
+from typing import Dict, Any
+
+@router.get("/{slug}/webauthn/register/options")
+async def webauthn_register_options(request: Request, slug: str = Path(max_length=64)):
+    row = await _validate_token(slug, request)
+    token_id = row["id"]
+    
+    options = generate_registration_options(
+        rp_id=RP_ID,
+        rp_name=RP_NAME,
+        user_id=token_id.encode('utf-8'),
+        user_name=row["label"],
+        user_display_name=row["label"],
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            user_verification=UserVerificationRequirement.REQUIRED
+        )
+    )
+    challenge_cache[token_id] = options.challenge
+    return json.loads(options.json())
+
+@router.post("/{slug}/webauthn/register")
+async def webauthn_register(body: Dict[str, Any], request: Request, slug: str = Path(max_length=64)):
+    row = await _validate_token(slug, request)
+    token_id = row["id"]
+    
+    expected_challenge = challenge_cache.get(token_id)
+    if not expected_challenge:
+        raise HTTPException(status_code=400, detail="Challenge missing")
+        
+    try:
+        verification = verify_registration_response(
+            credential=body,
+            expected_challenge=expected_challenge,
+            expected_rp_id=RP_ID,
+            expected_origin=settings.guest_url,
+            require_user_verification=True,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+        
+    await db.create_passkey(
+        token_id=token_id,
+        credential_id=base64.urlsafe_b64encode(verification.credential_id).decode('utf-8'),
+        public_key=verification.credential_public_key,
+        sign_count=verification.sign_count
+    )
+    
+    del challenge_cache[token_id]
+    
+    res = JSONResponse({"ok": True})
+    res.set_cookie(f"guest_auth_{token_id}", "true", httponly=True, samesite="strict", secure=True, max_age=86400*30)
+    return res
+
+@router.post("/{slug}/webauthn/opt_out")
+async def webauthn_opt_out(request: Request, slug: str = Path(max_length=64)):
+    row = await _validate_token(slug, request)
+    token_id = row["id"]
+    never_expires = (row["expires_at"] >= NEVER_EXPIRES_SECONDS)
+    
+    if never_expires:
+        raise HTTPException(status_code=400, detail="Cannot opt out of permanent token passkey")
+        
+    await db.set_passkey_optout(token_id)
+    return {"ok": True}
+
+
+@router.get("/{slug}/webauthn/auth/options")
+async def webauthn_auth_options(request: Request, slug: str = Path(max_length=64)):
+    row = await _validate_token(slug, request)
+    token_id = row["id"]
+    
+    options = generate_authentication_options(
+        rp_id=RP_ID,
+        user_verification=UserVerificationRequirement.REQUIRED
+    )
+    challenge_cache[token_id] = options.challenge
+    return json.loads(options.json())
+
+@router.post("/{slug}/webauthn/auth")
+async def webauthn_auth(body: Dict[str, Any], request: Request, slug: str = Path(max_length=64)):
+    row = await _validate_token(slug, request)
+    token_id = row["id"]
+    
+    expected_challenge = challenge_cache.get(token_id)
+    if not expected_challenge:
+        raise HTTPException(status_code=400, detail="Challenge missing")
+        
+    cred_id = body.get("id")
+    if not cred_id:
+        raise HTTPException(status_code=400, detail="Missing credential ID")
+        
+    passkey = await db.get_passkey_by_cred_id(cred_id)
+    if not passkey or passkey["token_id"] != token_id:
+        raise HTTPException(status_code=400, detail="Invalid credential")
+        
+    try:
+        verification = verify_authentication_response(
+            credential=body,
+            expected_challenge=expected_challenge,
+            expected_rp_id=RP_ID,
+            expected_origin=settings.guest_url,
+            credential_public_key=passkey["public_key"],
+            credential_current_sign_count=passkey["sign_count"],
+            require_user_verification=True
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+        
+    await db.update_passkey_sign_count(cred_id, verification.new_sign_count)
+    
+    del challenge_cache[token_id]
+    
+    res = JSONResponse({"ok": True})
+    res.set_cookie(f"guest_auth_{token_id}", "true", httponly=True, samesite="strict", secure=True, max_age=86400*30)
+    return res

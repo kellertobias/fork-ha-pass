@@ -164,6 +164,17 @@
   <p class="text-muted max-w-xs">Your guest session has ended. {{ contact_message }}</p>
 </div>
 
+<!-- Passkey overlays -->
+<div id="passkey-overlay" aria-live="assertive" class="hidden fixed inset-0 z-50 bg-bg-light dark:bg-bg-dark flex-col items-center justify-center text-center p-8 gap-4">
+  <div class="w-20 h-20 rounded-full bg-soot/5 dark:bg-white/5 flex items-center justify-center">
+    <span aria-hidden="true" class="material-symbols-outlined text-4xl text-primary" id="passkey-icon">fingerprint</span>
+  </div>
+  <h2 class="text-2xl font-serif" id="passkey-title">Security Required</h2>
+  <p class="text-muted max-w-xs" id="passkey-body">You need to set up a passkey to access.</p>
+  <div class="flex gap-3 mt-4" id="passkey-actions">
+  </div>
+</div>
+
 <!-- Confirm bottom sheet -->
 <div class="fixed inset-0 z-40 hidden items-end justify-center bg-soot/40 dark:bg-black/50 backdrop-blur-sm" id="sheet-backdrop">
   <div class="sheet-animate bg-surface-light dark:bg-surface-dark rounded-t-2xl p-6 w-full max-w-lg text-center" role="dialog" aria-modal="true" aria-labelledby="sheet-title" style="padding-bottom: calc(1.5rem + env(safe-area-inset-bottom));">
@@ -190,6 +201,7 @@ requestAnimationFrame(updateThemeToggles);
 const SLUG = {{ slug | tojson }};
 const EXPIRES_AT = {{ expires_at | tojson }};
 const NEVER_EXPIRES = {{ never_expires }};
+const PASSKEY_STATUS = {{ passkey_status | tojson }};
 let states = {};
 let entityOrder = [];
 let sheetCallback = null;
@@ -251,6 +263,10 @@ let expiryInterval = setInterval(() => {
 
 // ── Init ─────────────────────────────────────────────────────────────
 async function init() {
+  if (PASSKEY_STATUS !== 'OK' && PASSKEY_STATUS !== 'OPTED_OUT' && PASSKEY_STATUS !== 'AUTHENTICATED') {
+    showPasskeyOverlay();
+    return;
+  }
   try {
     const r = await fetch(`/g/${SLUG}/state`);
     if (r.status === 410) { showExpired(); return; }
@@ -385,6 +401,7 @@ function buildCard(eid, state) {
   else if (domain === 'media_player') controls = buildMediaControls(eid, state);
   else if (domain === 'cover') controls = buildCoverControls(eid, state);
   else if (domain === 'fan') controls = buildFanControls(eid, state);
+  else if (domain === 'script') controls = buildScriptControls(eid);
 
   const hasToggle = ['light', 'switch', 'input_boolean', 'fan'].includes(domain);
   const toggleHtml = hasToggle ? `<div class="toggle-track ${stateStr === 'on' ? 'on' : ''}"
@@ -564,6 +581,12 @@ function buildFanControls(eid, state) {
     <span aria-hidden="true" class="material-symbols-outlined text-base text-muted">mode_fan</span>
     <span class="text-xs text-muted tabular-nums min-w-[36px] text-right font-mono" id="fan-val-${cssId(eid)}">${pct}%</span>
   </div>`;
+}
+
+function buildScriptControls(eid) {
+  return `<button data-action="run-script" data-eid="${esc(eid)}" class="mt-3 w-full py-3 rounded-xl border-2 border-indigo-500/30 text-indigo-500 bg-indigo-500/5 font-display font-semibold text-sm flex items-center justify-center gap-2 active:scale-[0.98] transition-all">
+    <span aria-hidden="true" class="material-symbols-outlined text-lg">play_arrow</span> Run Script
+  </button>`;
 }
 
 // ── Card Updates (live SSE) ──────────────────────────────────────────
@@ -839,6 +862,21 @@ function closeSheet() {
   releaseFocus();
 }
 
+// ── Script Confirm (bottom sheet) ────────────────────────────────────
+function confirmScript(eid) {
+  document.getElementById('sheet-title').textContent = 'Run script?';
+  const stateObj = states[eid] || {};
+  const name = stateObj.attributes?.friendly_name || eid;
+  document.getElementById('sheet-body').textContent = `Are you sure you want to run ${esc(name)}?`;
+  sheetCallback = () => { sendCmd(eid, 'script', 'turn_on'); closeSheet(); };
+  const backdrop = document.getElementById('sheet-backdrop');
+  backdrop.classList.remove('hidden');
+  backdrop.classList.add('flex');
+  document.getElementById('sheet-ok').onclick = sheetCallback;
+  const dialog = backdrop.querySelector('[role="dialog"]');
+  if (dialog) trapFocus(dialog);
+}
+
 // ── Delegated Event Handlers ─────────────────────────────────────
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-action]');
@@ -860,6 +898,9 @@ document.addEventListener('click', e => {
       break;
     case 'confirm-lock':
       confirmLock(eid, el.dataset.locked === 'true');
+      break;
+    case 'run-script':
+      confirmScript(eid);
       break;
     case 'media-cmd':
       sendMediaCmd(eid, el.dataset.service);
@@ -937,6 +978,131 @@ function dismissInstallBanner() {
 // ── Service Worker ───────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
   if (!('{{ base_path }}')) navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+}
+
+function showPasskeyOverlay() {
+    const overlay = document.getElementById('passkey-overlay');
+    const title = document.getElementById('passkey-title');
+    const body = document.getElementById('passkey-body');
+    const actions = document.getElementById('passkey-actions');
+    overlay.classList.remove('hidden');
+    overlay.classList.add('flex');
+
+    if (PASSKEY_STATUS === 'UNCONFIGURED_REQUIRED') {
+        title.textContent = 'Create Passkey';
+        body.textContent = 'This permanent link requires a passkey to be configured before accessing the devices.';
+        actions.innerHTML = '<button onclick="registerPasskey()" class="px-6 py-3 rounded-xl bg-primary text-white text-sm font-display font-semibold">Create Passkey</button>';
+    } else if (PASSKEY_STATUS === 'UNCONFIGURED_OPTIONAL') {
+        title.textContent = 'Secure Your Link';
+        body.textContent = 'Would you like to configure a passkey to securely access this link in the future?';
+        actions.innerHTML = '<button onclick="optOutPasskey()" class="px-6 py-3 rounded-xl bg-soot/5 dark:bg-white/5 text-sm font-display font-semibold">Skip</button>' +
+                            '<button onclick="registerPasskey()" class="px-6 py-3 rounded-xl bg-primary text-white text-sm font-display font-semibold">Create Passkey</button>';
+    } else if (PASSKEY_STATUS === 'CONFIGURED_UNAUTHENTICATED') {
+        title.textContent = 'Unlock Required';
+        body.textContent = 'You must authenticate with your passkey to view and control devices.';
+        actions.innerHTML = '<button onclick="authPasskey()" class="px-6 py-3 rounded-xl bg-primary text-white text-sm font-display font-semibold">Unlock with Passkey</button>';
+    }
+}
+
+async function registerPasskey() {
+    try {
+        const res = await fetch(`/g/${SLUG}/webauthn/register/options`);
+        if (!res.ok) throw new Error("Failed to get options");
+        const options = await res.json();
+        
+        options.user.id = b64ToUrlSafe(options.user.id);
+        options.challenge = b64ToUrlSafe(options.challenge);
+        if (options.excludeCredentials) {
+            options.excludeCredentials.forEach(cred => {
+                cred.id = b64ToUrlSafe(cred.id);
+            });
+        }
+        
+        const credential = await navigator.credentials.create({ publicKey: options });
+        
+        const payload = {
+            id: credential.id,
+            rawId: urlSafeToB64(credential.rawId),
+            type: credential.type,
+            response: {
+                attestationObject: urlSafeToB64(credential.response.attestationObject),
+                clientDataJSON: urlSafeToB64(credential.response.clientDataJSON),
+                transports: credential.response.getTransports ? credential.response.getTransports() : []
+            }
+        };
+
+        const verifyRes = await fetch(`/g/${SLUG}/webauthn/register`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        if (verifyRes.ok) {
+            window.location.reload();
+        } else {
+            showToast('Registration failed');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message);
+    }
+}
+
+async function authPasskey() {
+    try {
+        const res = await fetch(`/g/${SLUG}/webauthn/auth/options`);
+        if (!res.ok) throw new Error("Failed to get options");
+        const options = await res.json();
+        
+        options.challenge = b64ToUrlSafe(options.challenge);
+        if (options.allowCredentials) {
+            options.allowCredentials.forEach(cred => { cred.id = b64ToUrlSafe(cred.id); });
+        }
+        
+        const assertion = await navigator.credentials.get({ publicKey: options });
+        
+        const payload = {
+            id: assertion.id,
+            rawId: urlSafeToB64(assertion.rawId),
+            type: assertion.type,
+            response: {
+                authenticatorData: urlSafeToB64(assertion.response.authenticatorData),
+                clientDataJSON: urlSafeToB64(assertion.response.clientDataJSON),
+                signature: urlSafeToB64(assertion.response.signature),
+                userHandle: assertion.response.userHandle ? urlSafeToB64(assertion.response.userHandle) : null
+            }
+        };
+
+        const verifyRes = await fetch(`/g/${SLUG}/webauthn/auth`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        if (verifyRes.ok) {
+            window.location.reload();
+        } else {
+            showToast('Authentication failed');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message);
+    }
+}
+
+async function optOutPasskey() {
+    await fetch(`/g/${SLUG}/webauthn/opt_out`, { method: 'POST' });
+    window.location.reload();
+}
+
+function b64ToUrlSafe(b64) {
+    const raw = atob(b64.replace(/-/g, '+').replace(/_/g, '/'));
+    const arr = new Uint8Array(new ArrayBuffer(raw.length));
+    for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    return arr;
+}
+
+function urlSafeToB64(buffer) {
+    let str = "";
+    const arr = new Uint8Array(buffer);
+    for (const char of arr) str += String.fromCharCode(char);
+    return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
 init();

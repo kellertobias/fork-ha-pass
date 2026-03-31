@@ -216,6 +216,47 @@ async def touch_token(token_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Passkeys
+# ---------------------------------------------------------------------------
+
+async def set_passkey_optout(token_id: str) -> None:
+    db = await get_db()
+    await db.execute("UPDATE tokens SET passkey_opted_out = 1 WHERE id = ?", (token_id,))
+    await db.commit()
+
+
+async def get_passkey_by_cred_id(credential_id: str) -> aiosqlite.Row | None:
+    db = await get_db()
+    async with db.execute("SELECT * FROM passkeys WHERE credential_id = ?", (credential_id,)) as cur:
+        return await cur.fetchone()
+
+
+async def get_passkeys_for_token(token_id: str) -> list[aiosqlite.Row]:
+    db = await get_db()
+    async with db.execute("SELECT * FROM passkeys WHERE token_id = ?", (token_id,)) as cur:
+        return await cur.fetchall()
+
+
+async def create_passkey(token_id: str, credential_id: str, public_key: bytes, sign_count: int) -> None:
+    db = await get_db()
+    await db.execute(
+        """INSERT INTO passkeys (token_id, credential_id, public_key, sign_count, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (token_id, credential_id, public_key, sign_count, int(time.time())),
+    )
+    await db.commit()
+
+
+async def update_passkey_sign_count(credential_id: str, sign_count: int) -> None:
+    db = await get_db()
+    await db.execute(
+        "UPDATE passkeys SET sign_count = ? WHERE credential_id = ?",
+        (sign_count, credential_id),
+    )
+    await db.commit()
+
+
+# ---------------------------------------------------------------------------
 # Access log
 # ---------------------------------------------------------------------------
 

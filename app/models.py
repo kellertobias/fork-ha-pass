@@ -17,6 +17,7 @@ ALLOWED_SERVICES: dict[str, set[str]] = {
                       "media_play_pause", "turn_on", "turn_off"},
     "cover":         {"open_cover", "close_cover", "stop_cover"},
     "fan":           {"turn_on", "turn_off", "toggle", "set_percentage"},
+    "script":        {"turn_on"},
 }
 
 # Keys that could bypass the entity allowlist if forwarded to HA
