@@ -522,7 +522,11 @@ function renderTokens() {
             <span aria-hidden="true" class="material-symbols-outlined text-sm">edit</span> Edit
           </button>
         </div>
-        <div class="grid grid-cols-2 gap-2 mt-2">
+        <div class="grid grid-cols-3 gap-2 mt-2">
+          <button data-id="${esc(t.id)}" data-action="open-clone-modal"
+            class="flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-display font-medium border border-border-light dark:border-border-dark hover:bg-soot/5 dark:hover:bg-white/5 transition-colors">
+            <span aria-hidden="true" class="material-symbols-outlined text-sm">content_copy</span> Clone
+          </button>
           <button data-id="${esc(t.id)}" data-label="${esc(t.label)}" data-action="open-extend-modal"
             class="flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-display font-medium bg-accent/10 text-accent hover:bg-accent/20 transition-colors">
             <span aria-hidden="true" class="material-symbols-outlined text-sm">update</span> Extend
@@ -657,6 +661,27 @@ function openCreateModal() {
   openModal('create-modal');
 }
 function closeCreateModal() { closeModal('create-modal'); }
+
+async function openCloneModal(tokenId) {
+  const r = await fetch(`${BASE}/admin/tokens/${tokenId}`);
+  if (!r.ok) { showToast('Failed to load token', 'error'); return; }
+  const token = await r.json();
+
+  createPicker = { selected: new Set(token.entity_ids || []), filter: 'all', search: '' };
+  document.getElementById('f-label').value = token.label + ' Copy';
+  document.getElementById('f-slug').value = '';
+  document.getElementById('f-ip').value = token.ip_allowlist ? token.ip_allowlist.join(', ') : '';
+  
+  document.getElementById('f-expiry').value = '86400';
+  document.getElementById('create-error').textContent = '';
+  document.getElementById('f-custom-expiry').classList.add('hidden');
+  document.getElementById('f-never-warn').classList.add('hidden');
+  document.getElementById('f-custom-error').classList.add('hidden');
+  document.getElementById('f-custom-datetime').value = '';
+  
+  renderPicker('create-picker', createPicker);
+  openModal('create-modal');
+}
 
 async function submitCreate() {
   const label = document.getElementById('f-label').value.trim();
@@ -1018,6 +1043,7 @@ document.addEventListener('click', e => {
 
     // Create modal
     case 'open-create-modal': openCreateModal(); break;
+    case 'open-clone-modal': openCloneModal(el.dataset.id); break;
     case 'submit-create': submitCreate(); break;
 
     // Edit modal
