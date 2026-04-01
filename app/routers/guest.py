@@ -366,7 +366,7 @@ async def webauthn_register(body: Dict[str, Any], request: Request, slug: str = 
         
     await db.create_passkey(
         token_id=token_id,
-        credential_id=base64.urlsafe_b64encode(verification.credential_id).decode('utf-8'),
+        credential_id=body.get("id"),
         public_key=verification.credential_public_key,
         sign_count=verification.sign_count
     )
@@ -415,8 +415,9 @@ async def webauthn_auth(body: Dict[str, Any], request: Request, slug: str = Path
     if not cred_id:
         raise HTTPException(status_code=400, detail="Missing credential ID")
         
-    passkey = await db.get_passkey_by_cred_id(cred_id)
-    if not passkey or passkey["token_id"] != token_id:
+    passkeys = await db.get_passkeys_for_token(token_id)
+    passkey = passkeys[0] if passkeys else None
+    if not passkey:
         raise HTTPException(status_code=400, detail="Invalid credential")
         
     try:
@@ -432,7 +433,7 @@ async def webauthn_auth(body: Dict[str, Any], request: Request, slug: str = Path
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
         
-    await db.update_passkey_sign_count(cred_id, verification.new_sign_count)
+    await db.update_passkey_sign_count(passkey["credential_id"], verification.new_sign_count)
     
     del challenge_cache[token_id]
     
