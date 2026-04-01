@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Path, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import base64
 import urllib.parse
-from webauthn import generate_registration_options, verify_registration_response, generate_authentication_options, verify_authentication_response
+from webauthn import generate_registration_options, verify_registration_response, generate_authentication_options, verify_authentication_response, options_to_json
 from webauthn.helpers.structs import AuthenticatorSelectionCriteria, UserVerificationRequirement
 from fastapi.templating import Jinja2Templates
 
@@ -342,7 +342,7 @@ async def webauthn_register_options(request: Request, slug: str = Path(max_lengt
         )
     )
     challenge_cache[token_id] = options.challenge
-    return json.loads(options.json())
+    return json.loads(options_to_json(options))
 
 @router.post("/{slug}/webauthn/register")
 async def webauthn_register(body: Dict[str, Any], request: Request, slug: str = Path(max_length=64)):
@@ -400,7 +400,7 @@ async def webauthn_auth_options(request: Request, slug: str = Path(max_length=64
         user_verification=UserVerificationRequirement.REQUIRED
     )
     challenge_cache[token_id] = options.challenge
-    return json.loads(options.json())
+    return json.loads(options_to_json(options))
 
 @router.post("/{slug}/webauthn/auth")
 async def webauthn_auth(body: Dict[str, Any], request: Request, slug: str = Path(max_length=64)):
