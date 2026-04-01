@@ -128,7 +128,7 @@ async def guest_pwa(request: Request, slug: str = Path(max_length=64)):
     )
 
     passkeys = await db.get_passkeys_for_token(token_id)
-    opted_out = row.get("passkey_opted_out", 0)
+    opted_out = row["passkey_opted_out"] if "passkey_opted_out" in row.keys() else 0
     never_expires = (row["expires_at"] >= NEVER_EXPIRES_SECONDS)
     
     passkey_status = "OK"
