@@ -1,8 +1,8 @@
-name: HAPass
+name: Custom HAPass
 version: "0.2.1"
-slug: ha-pass
-description: Shareable guest links for controlling Home Assistant devices
-url: "https://github.com/rohithkadaveru/ha-pass"
+slug: custom-ha-pass
+description: Shareable guest links with passkeys and scripts (Custom Fork)
+url: "https://github.com/kellertobias/fork-ha-pass"
 arch: [amd64, aarch64]
 startup: application
 boot: auto
